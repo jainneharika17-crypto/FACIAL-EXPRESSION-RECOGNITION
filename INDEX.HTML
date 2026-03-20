@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Emotion Reader AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load face-api.js for in-browser facial recognition -->
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <style>
+        /* Smooth transition for background colors */
+        body { transition: background-color 0.5s ease; }
+        
+        /* Mirror the video so it feels like a real mirror */
+        #video { transform: scaleX(-1); }
+    </style>
+</head>
+<body class="bg-gray-950 text-white min-h-screen flex flex-col items-center justify-center p-4 sm:p-8 font-sans transition-colors" id="app-body">
+
+    <div class="max-w-3xl w-full flex flex-col items-center space-y-8">
+        
+        <!-- Header -->
+        <div class="text-center space-y-2">
+            <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
+                Emotion Reader
+            </h1>
+            <p class="text-gray-400">Make a face (Happy, Sad, or Angry) at the camera!</p>
+        </div>
+
+        <!-- Camera Container -->
+        <div class="relative w-full max-w-lg aspect-[4/3] rounded-3xl overflow-hidden shadow-[0_0_40px_rgba(0,0,0,0.5)] bg-gray-900 ring-4 ring-gray-800 transition-all duration-300" id="video-container">
+            
+            <video id="video" class="w-full h-full object-cover" autoplay muted playsinline></video>
+            
+            <!-- Loading Overlay -->
+            <div id="overlay" class="absolute inset-0 flex flex-col items-center justify-center bg-gray-950/90 z-10 backdrop-blur-sm transition-opacity duration-500">
+                <svg class="animate-spin h-10 w-10 text-blue-500 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span id="status-text" class="text-lg font-medium text-gray-300 animate-pulse">Loading AI Models...</span>
+                <span class="text-xs text-gray-500 mt-2 max-w-xs text-center">This runs entirely in your browser. No video is sent to the cloud.</span>
+            </div>
+        </div>
+
+        <!-- Results Display -->
+        <div class="text-center w-full bg-gray-900/50 backdrop-blur-md rounded-3xl p-6 ring-1 ring-white/10 shadow-xl">
+            <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-widest mb-4">Current Expression</h2>
+            
+            <div class="flex flex-col items-center justify-center space-y-2">
+                <div id="emotion-emoji" class="text-8xl drop-shadow-lg transition-transform duration-200 transform hover:scale-110">
+                    🕵️
+                </div>
+                <div id="emotion-result" class="text-5xl md:text-6xl font-black tracking-wider text-gray-500 transition-colors duration-300 mt-2 uppercase">
+                    Detecting
+                </div>
+                <div id="confidence-bar" class="w-48 h-2 bg-gray-800 rounded-full mt-4 overflow-hidden opacity-0 transition-opacity">
+                    <div id="confidence-fill" class="h-full bg-white transition-all duration-200 w-0"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const statusText = document.getElementById('status-text');
+        const emotionResult = document.getElementById('emotion-result');
+        const emotionEmoji = document.getElementById('emotion-emoji');
+        const appBody = document.getElementById('app-body');
+        const videoContainer = document.getElementById('video-container');
+        const confidenceBar = document.getElementById('confidence-bar');
+        const confidenceFill = document.getElementById('confidence-fill');
+
+        // We use jsdelivr to load the pre-trained weights for the face-api models
+        const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+
+        // Configuration for how emotions map to UI colors and emojis
+        const emotionConfig = {
+            happy: { text: "Happy", color: "text-green-400", bg: "bg-green-950", ring: "ring-green-500/50", emoji: "😄" },
+            sad: { text: "Sad", color: "text-blue-400", bg: "bg-blue-950", ring: "ring-blue-500/50", emoji: "😢" },
+            angry: { text: "Angry", color: "text-red-500", bg: "bg-red-950", ring: "ring-red-500/50", emoji: "😡" },
+            neutral: { text: "Neutral", color: "text-gray-300", bg: "bg-gray-950", ring: "ring-gray-700", emoji: "😐" },
+            surprised: { text: "Surprised", color: "text-yellow-400", bg: "bg-yellow-950", ring: "ring-yellow-500/50", emoji: "😲" },
+            fearful: { text: "Fearful", color: "text-purple-400", bg: "bg-purple-950", ring: "ring-purple-500/50", emoji: "😨" },
+            disgusted: { text: "Disgusted", color: "text-green-600", bg: "bg-emerald-950", ring: "ring-emerald-500/50", emoji: "🤢" }
+        };
+
+        async function loadModels() {
+            try {
+                // Load only the minimal models needed for fast expression detection
+                await Promise.all([
+                    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL)
+                ]);
+                statusText.innerText = "Requesting Camera Access...";
+                startVideo();
+            } catch (error) {
+                console.error("Error loading models:", error);
+                statusText.innerText = "Failed to load AI models. Please check your internet connection.";
+            }
+        }
+
+        function startVideo() {
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } })
+                .then(stream => {
+                    video.srcObject = stream;
+                })
+                .catch(err => {
+                    console.error("Camera error:", err);
+                    statusText.innerText = "Camera access denied. Please enable camera permissions.";
+                });
+        }
+
+        // Wait until the video stream actually starts playing
+        video.addEventListener('play', () => {
+            // Fade out the loading overlay
+            overlay.style.opacity = '0';
+            setTimeout(() => overlay.style.display = 'none', 500);
+            confidenceBar.style.opacity = '1';
+
+            // Run detection loop
+            setInterval(async () => {
+                if (video.paused || video.ended) return;
+                
+                // Detect face and expressions
+                const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions()).withFaceExpressions();
+                
+                if (detections && detections.length > 0) {
+                    const expressions = detections[0].expressions;
+                    
+                    // Find the emotion with the highest probability
+                    let dominantEmotion = 'neutral';
+                    let maxProbability = 0;
+                    
+                    for (const [emotion, probability] of Object.entries(expressions)) {
+                        if (probability > maxProbability) {
+                            maxProbability = probability;
+                            dominantEmotion = emotion;
+                        }
+                    }
+
+                    updateUI(dominantEmotion, maxProbability);
+                } else {
+                    // No face found in the frame
+                    resetUI();
+                }
+            }, 150); // Run roughly 6-7 times a second for smooth performance without lagging the browser
+        });
+
+        function updateUI(emotion, probability) {
+            const config = emotionConfig[emotion] || emotionConfig.neutral;
+            
+            // Update Text & Emoji
+            emotionResult.innerText = config.text;
+            emotionResult.className = `text-5xl md:text-6xl font-black tracking-wider transition-colors duration-300 mt-2 uppercase ${config.color}`;
+            emotionEmoji.innerText = config.emoji;
+            
+            // Update Background and Glow effects
+            appBody.className = `min-h-screen flex flex-col items-center justify-center p-4 sm:p-8 font-sans transition-colors duration-500 text-white ${config.bg}`;
+            videoContainer.className = `relative w-full max-w-lg aspect-[4/3] rounded-3xl overflow-hidden shadow-[0_0_60px_rgba(0,0,0,0.4)] transition-all duration-500 ring-4 ${config.ring}`;
+
+            // Update Confidence Bar
+            confidenceFill.style.width = `${Math.round(probability * 100)}%`;
+            confidenceFill.className = `h-full transition-all duration-200 ${config.color.replace('text-', 'bg-')}`;
+        }
+
+        function resetUI() {
+            emotionResult.innerText = "No Face";
+            emotionResult.className = "text-5xl md:text-6xl font-black tracking-wider transition-colors duration-300 mt-2 uppercase text-gray-600";
+            emotionEmoji.innerText = "🕵️";
+            appBody.className = "bg-gray-950 text-white min-h-screen flex flex-col items-center justify-center p-4 sm:p-8 font-sans transition-colors duration-500";
+            videoContainer.className = "relative w-full max-w-lg aspect-[4/3] rounded-3xl overflow-hidden shadow-[0_0_40px_rgba(0,0,0,0.5)] bg-gray-900 ring-4 ring-gray-800 transition-all duration-300";
+            confidenceFill.style.width = '0%';
+        }
+
+        // Initialize App: Wait for the face-api script to finish downloading from the CDN
+        const checkFaceApi = setInterval(() => {
+            if (typeof faceapi !== 'undefined') {
+                clearInterval(checkFaceApi);
+                loadModels();
+            }
+        }, 100);
+
+    </script>
+</body>
+</html>
